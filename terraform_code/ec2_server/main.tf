@@ -11,10 +11,50 @@ provider "aws" {
   region = var.region_name
 }
 
+resource "aws_vpc" "vpc-dev" {
+  cidr_block = "10.0.0.0/16"
+  tags = {
+    "Name" = "vpc-dev"
+  }
+}
+
+# Resource-2: Create Subnets
+resource "aws_subnet" "vpc-dev-public-subnet-1" {
+  vpc_id                  = aws_vpc.vpc-dev.id
+  cidr_block              = "10.0.1.0/24"
+  availability_zone       = "eu-west-2a"
+  map_public_ip_on_launch = true
+}
+
+# Resource-3: Internet Gateway
+resource "aws_internet_gateway" "vpc-dev-igw" {
+  vpc_id = aws_vpc.vpc-dev.id
+}
+
+# Resource-4: Create Route Table
+resource "aws_route_table" "vpc-dev-public-route-table" {
+  vpc_id = aws_vpc.vpc-dev.id
+}
+
+# Resource-5: Create Route in Route Table for Internet Access
+resource "aws_route" "vpc-dev-public-route" {
+  route_table_id         = aws_route_table.vpc-dev-public-route-table.id
+  destination_cidr_block = "0.0.0.0/0"
+  gateway_id             = aws_internet_gateway.vpc-dev-igw.id
+}
+
+# Resource-6: Associate the Route Table with the Subnet
+resource "aws_route_table_association" "vpc-dev-public-route-table-associate" {
+  route_table_id = aws_route_table.vpc-dev-public-route-table.id
+  subnet_id      = aws_subnet.vpc-dev-public-subnet-1.id
+}
+
+
 # STEP1: CREATE SG
 resource "aws_security_group" "my-sg" {
   name        = "JENKINS-SERVER-SG"
   description = "Jenkins Server Ports"
+  vpc_id                  = aws_vpc.vpc-dev.id
   
   # Port 22 is required for SSH Access
   ingress {
@@ -133,11 +173,49 @@ resource "aws_security_group" "my-sg" {
   }
 }
 
+## Output variables
+output "ssh_keypair" {
+  value = tls_private_key.key.private_key_pem
+  sensitive = true
+}
+
+
+output "key_name" {
+  value = aws_key_pair.key_pair.key_name
+  
+}
+
+## variable definition
+variable "key_name_definer" {
+  description = ""
+  default     = "LL-TEST"
+  type        = string
+}
+
+
+## Key Pair Creation#######################################
+resource "tls_private_key" "key" {
+  algorithm = "RSA"
+}
+
+resource "local_file" "private_key" {
+  filename          = "${var.key_name_definer}-key.pem"
+  sensitive_content = tls_private_key.key.private_key_pem
+  file_permission   = "0400"
+}
+
+resource "aws_key_pair" "key_pair" {
+  key_name   = "${var.key_name_definer}-key"
+  public_key = tls_private_key.key.public_key_openssh
+}
+
+
 # STEP2: CREATE EC2 USING PEM & SG
 resource "aws_instance" "my-ec2" {
   ami           = var.ami   
   instance_type = var.instance_type
-  key_name      = var.key_name        
+  key_name      =  "${var.key_name_definer}-key"
+  subnet_id              = aws_subnet.vpc-dev-public-subnet-1.id
   vpc_security_group_ids = [aws_security_group.my-sg.id]
   
   root_block_device {
@@ -153,7 +231,7 @@ resource "aws_instance" "my-ec2" {
     # ESTABLISHING SSH CONNECTION WITH EC2
     connection {
       type        = "ssh"
-      private_key = file("./key.pem") # replace with your key-name 
+      private_key = tls_private_key.key.private_key_pem # replace with your key-name 
       user        = "ubuntu"
       host        = self.public_ip
     }
