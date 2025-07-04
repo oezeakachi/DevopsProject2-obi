@@ -41,32 +41,6 @@ resource "aws_iam_role_policy" "jenkins_eks_describe_cluster" {
   })
 }
 
-resource "aws_iam_role" "admin_eks_assume_role" {
-  name = "admin-eks-assume-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [{
-      Effect = "Allow",
-      Principal = {
-        AWS = "arn:aws:iam::434612646751:user/open-environment-5vzkp-admin"
-      },
-      Action = "sts:AssumeRole"
-    }]
-  })
-
-  tags = {
-    Purpose = "Allow admin user to access EKS"
-  }
-}
-
-# Attach full EKS access
-resource "aws_iam_role_policy_attachment" "admin_eks_full_access" {
-  role       = aws_iam_role.admin_eks_assume_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
-}
-
-
 # EKS Cluster Module
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
@@ -98,9 +72,9 @@ module "eks" {
   }
 
   access_entries = {
-    admin_user = {
-      principal_arn = aws_iam_role.admin_eks_assume_role.arn
-      username      = "admin-user"
+    admin = {
+      principal_arn = "arn:aws:iam::434612646751:user/open-environment-5vzkp-admin"
+      username      = "open-environment-5vzkp-admin"
       groups        = ["system:masters"]
     }
 
