@@ -89,11 +89,11 @@ pipeline {
     
     parameters {
         string(name: 'ECR_REPO_NAME', defaultValue: 'amazon-prime', description: 'Enter repository name')
-        string(name: 'AWS_ACCOUNT_ID', defaultValue: '123456789012', description: 'Enter AWS Account ID') // Added missing quote
+        string(name: 'AWS_ACCOUNT_ID', defaultValue: '123456789012', description: 'Enter AWS Account ID')
     }
     
     tools {
-        jdk 'JDK'
+        jdk 'JDK17'
         nodejs 'NodeJS'
     }
     
@@ -104,7 +104,7 @@ pipeline {
     stages {
         stage('1. Git Checkout') {
             steps {
-                git branch: 'main', url: 'https://github.com/pandacloud1/DevopsProject2.git'
+                git credentialsId: 'github-pat', branch: 'main', url: 'https://github.com/oezeakachi/DevopsProject2-obi.git'
             }
         }
         
@@ -150,8 +150,8 @@ pipeline {
                 withCredentials([string(credentialsId: 'access-key', variable: 'AWS_ACCESS_KEY'), 
                                  string(credentialsId: 'secret-key', variable: 'AWS_SECRET_KEY')]) {
                     sh """
-                    aws configure set aws_access_key_id $AWS_ACCESS_KEY
-                    aws configure set aws_secret_access_key $AWS_SECRET_KEY
+                    export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY
+                    export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_KEY
                     aws ecr describe-repositories --repository-names ${params.ECR_REPO_NAME} --region us-east-1 || \
                     aws ecr create-repository --repository-name ${params.ECR_REPO_NAME} --region us-east-1
                     """
@@ -164,6 +164,8 @@ pipeline {
                 withCredentials([string(credentialsId: 'access-key', variable: 'AWS_ACCESS_KEY'), 
                                  string(credentialsId: 'secret-key', variable: 'AWS_SECRET_KEY')]) {
                     sh """
+                    export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY
+                    export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_KEY
                     aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${params.AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com
                     docker tag ${params.ECR_REPO_NAME} ${params.AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/${params.ECR_REPO_NAME}:${BUILD_NUMBER}
                     docker tag ${params.ECR_REPO_NAME} ${params.AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/${params.ECR_REPO_NAME}:latest
@@ -177,6 +179,8 @@ pipeline {
                 withCredentials([string(credentialsId: 'access-key', variable: 'AWS_ACCESS_KEY'), 
                                  string(credentialsId: 'secret-key', variable: 'AWS_SECRET_KEY')]) {
                     sh """
+                    export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY
+                    export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_KEY
                     docker push ${params.AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/${params.ECR_REPO_NAME}:${BUILD_NUMBER}
                     docker push ${params.AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/${params.ECR_REPO_NAME}:latest
                     """
@@ -189,7 +193,7 @@ pipeline {
                 sh """
                 docker rmi ${params.AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/${params.ECR_REPO_NAME}:${BUILD_NUMBER}
                 docker rmi ${params.AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/${params.ECR_REPO_NAME}:latest
-		docker images
+                docker images
                 """
             }
         }
@@ -205,64 +209,126 @@ pipeline {
 ### Deployment Pipeline
 ```groovy
 pipeline {
-    agent any
+  agent any
 
-    environment {
-        KUBECTL = '/usr/local/bin/kubectl'
-    }
+  environment {
+      KUBECTL = '/usr/local/bin/kubectl'
+      AWS_REGION = 'eu-west-2'
+  }
 
-    parameters {
-        string(name: 'CLUSTER_NAME', defaultValue: 'amazon-prime-cluster', description: 'Enter your EKS cluster name')
-    }
+  parameters {
+      string(name: 'CLUSTER_NAME', defaultValue: '', description: 'Enter your EKS cluster name (e.g., amazon-prime-cluster)')
+      string(name: 'EKS_ACCOUNT_ID', defaultValue: '', description: 'Enter the AWS Account ID for the EKS cluster')
+  }
 
-    stages {
-        stage("Login to EKS") {
-            steps {
-                script {
-                    withCredentials([string(credentialsId: 'access-key', variable: 'AWS_ACCESS_KEY'),
-                                     string(credentialsId: 'secret-key', variable: 'AWS_SECRET_KEY')]) {
-                        sh "aws eks --region us-east-1 update-kubeconfig --name ${params.CLUSTER_NAME}"
-                    }
-                }
-            }
+  stages {
+      stage("Assume Role and Configure AWS CLI") {
+          steps {
+              script {
+                  withCredentials([
+                      string(credentialsId: 'access-key', variable: 'AWS_ACCESS_KEY'),
+                      string(credentialsId: 'secret-key', variable: 'AWS_SECRET_KEY')
+                  ]) {
+                      sh """
+                          aws configure set aws_access_key_id $AWS_ACCESS_KEY
+                          aws configure set aws_secret_access_key $AWS_SECRET_KEY
+                          aws configure set region ${env.AWS_REGION}
+                      """
+
+                      def assumeRoleOutput = sh(
+                          script: """
+                              aws sts assume-role \
+                                --role-arn arn:aws:iam::${params.EKS_ACCOUNT_ID}:role/jenkins-eks-assume-role \
+                                --role-session-name jenkins-session \
+                                --region ${env.AWS_REGION} \
+                                --output json
+                          """,
+                          returnStdout: true
+                      ).trim()
+
+                      def creds = readJSON text: assumeRoleOutput
+                      env.AWS_ACCESS_KEY_ID = creds.Credentials.AccessKeyId
+                      env.AWS_SECRET_ACCESS_KEY = creds.Credentials.SecretAccessKey
+                      env.AWS_SESSION_TOKEN = creds.Credentials.SessionToken
+                  }
+
+                  sh """
+                      aws eks --region ${env.AWS_REGION} update-kubeconfig --name ${params.CLUSTER_NAME}
+                  """
+              }
+          }
+      }
+
+      stage('Install yq') {
+        steps {
+          sh '''
+            if ! command -v yq &> /dev/null; then
+              echo "Installing yq..."
+              sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+              sudo chmod +x /usr/local/bin/yq
+            else
+              echo "yq is already installed"
+            fi
+
+            yq --version
+          '''
         }
+      }
 
-        stage("Configure Prometheus & Grafana") {
-            steps {
-                script {
-                    sh """
-                    helm repo add stable https://charts.helm.sh/stable || true
-                    helm repo add prometheus-community https://prometheus-community.github.io/helm-charts || true
-                    # Check if namespace 'prometheus' exists
-                    if kubectl get namespace prometheus > /dev/null 2>&1; then
-                        # If namespace exists, upgrade the Helm release
-                        helm upgrade stable prometheus-community/kube-prometheus-stack -n prometheus
+      stage('Patch aws-auth ConfigMap') {
+          steps {
+              script {
+                  sh """
+                    set -e
+                    echo "Fetching current aws-auth ConfigMap..."
+                    kubectl get configmap aws-auth -n kube-system -o yaml > aws-auth.yaml
+
+                    if ! grep -q "arn:aws:iam::${params.EKS_ACCOUNT_ID}:role/jenkins-eks-assume-role" aws-auth.yaml; then
+                      echo "Patching aws-auth ConfigMap to add Jenkins IAM role..."
+                      yq e '.data.mapRoles += "- rolearn: arn:aws:iam::${params.EKS_ACCOUNT_ID}:role/jenkins-eks-assume-role\\n  username: jenkins\\n  groups:\\n    - system:masters\\n"' -i aws-auth.yaml
+                      kubectl apply -f aws-auth.yaml -n kube-system
+                      echo "Patch applied successfully."
                     else
-                        # If namespace does not exist, create it and install Helm release
-                        kubectl create namespace prometheus
-                        helm install stable prometheus-community/kube-prometheus-stack -n prometheus
+                      echo "Jenkins IAM role already present in aws-auth ConfigMap."
                     fi
-                    kubectl patch svc stable-kube-prometheus-sta-prometheus -n prometheus -p '{"spec": {"type": "LoadBalancer"}}'
-                    kubectl patch svc stable-grafana -n prometheus -p '{"spec": {"type": "LoadBalancer"}}'
-                    """
-                }
-            }
-        }
+                  """
+              }
+          }
+      }
 
-        stage("Configure ArgoCD") {
-            steps {
-                script {
-                    sh """
-                    # Install ArgoCD
-                    kubectl create namespace argocd || true
-                    kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-                    kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "LoadBalancer"}}'
-                    """
-                }
-            }
-        }
-		
-    }
+      stage("Configure Prometheus & Grafana") {
+          steps {
+              script {
+                  sh """
+                      helm repo add stable https://charts.helm.sh/stable || true
+                      helm repo add prometheus-community https://prometheus-community.github.io/helm-charts || true
+
+                      if kubectl get namespace prometheus > /dev/null 2>&1; then
+                          helm upgrade stable prometheus-community/kube-prometheus-stack -n prometheus
+                      else
+                          kubectl create namespace prometheus
+                          helm install stable prometheus-community/kube-prometheus-stack -n prometheus
+                      fi
+
+                      kubectl patch svc stable-kube-prometheus-sta-prometheus -n prometheus -p '{"spec": {"type": "LoadBalancer"}}'
+                      kubectl patch svc stable-grafana -n prometheus -p '{"spec": {"type": "LoadBalancer"}}'
+                  """
+              }
+          }
+      }
+
+      stage("Configure ArgoCD") {
+          steps {
+              script {
+                  sh """
+                      kubectl create namespace argocd || true
+                      kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+                      kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "LoadBalancer"}}'
+                  """
+              }
+          }
+      }
+  }
 }
 ```
 
@@ -347,5 +413,22 @@ pipeline {
 
 ## Additional Information
 For further details, refer to the word document containing a complete write-up of the project.
+
+
+Extra troubleshooting notes 
+
+ Final To-Do Before Running
+In Jenkins Credentials:
+Add GitHub PAT as:
+Kind: Username with password
+ID: github-pat
+Username: your GitHub username
+Password: your GitHub Personal Access Token
+Ensure the following credentials are correctly configured:
+access-key – your AWS access key
+secret-key – your AWS secret key
+sonar-token – for SonarQube quality gate
+
+
 
 ---
